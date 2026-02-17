@@ -1,0 +1,9 @@
+[project]
+name = "ai-agentas"
+version = "0.0.1"
+description = "Offline-first citatų ir bibliografijos apdorojimas į Zotero importą"
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+

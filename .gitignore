@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Local runtime
+.env
+src/ai_agentas/data/
+_uploaded/
+*.zotero-mvp.docx
+
+# Temp
+čia
