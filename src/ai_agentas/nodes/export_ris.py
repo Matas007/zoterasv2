@@ -31,8 +31,9 @@ def ref_to_ris(ref: ParsedReference) -> str:
     """Konvertuoja viena ParsedReference i RIS formato bloka."""
     lines: list[str] = []
     lines.append(f"TY  - {_guess_ris_type(ref)}")
-    if ref.author:
-        for a in ref.author.split(","):
+    author_list = ref.authors if ref.authors else ([ref.author] if ref.author else [])
+    if author_list:
+        for a in author_list:
             a = a.strip()
             if a:
                 lines.append(f"AU  - {a}")

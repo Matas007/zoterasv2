@@ -6,10 +6,11 @@ from .parse_bibliography import ParsedReference
 SUPPORTED_STYLES = ["APA 7", "IEEE", "ISO 690", "MLA 9"]
 
 
-def _fmt_authors_apa(author: str | None) -> str:
-    if not author:
+def _fmt_authors_apa(authors: list[str], author: str | None) -> str:
+    if not authors and not author:
         return "Anon."
-    parts = [a.strip() for a in author.split(",") if a.strip()]
+    parts = authors if authors else [author] if author else []
+    parts = [a.strip() for a in parts if a and a.strip()]
     if len(parts) == 1:
         return parts[0]
     if len(parts) == 2:
@@ -17,19 +18,21 @@ def _fmt_authors_apa(author: str | None) -> str:
     return ", ".join(parts[:-1]) + f", & {parts[-1]}"
 
 
-def _fmt_authors_ieee(author: str | None) -> str:
-    if not author:
+def _fmt_authors_ieee(authors: list[str], author: str | None) -> str:
+    if not authors and not author:
         return "Anon"
-    parts = [a.strip() for a in author.split(",") if a.strip()]
+    parts = authors if authors else [author] if author else []
+    parts = [a.strip() for a in parts if a and a.strip()]
     if len(parts) <= 3:
         return ", ".join(parts)
     return f"{parts[0]} et al."
 
 
-def _fmt_authors_mla(author: str | None) -> str:
-    if not author:
+def _fmt_authors_mla(authors: list[str], author: str | None) -> str:
+    if not authors and not author:
         return "Anon."
-    parts = [a.strip() for a in author.split(",") if a.strip()]
+    parts = authors if authors else [author] if author else []
+    parts = [a.strip() for a in parts if a and a.strip()]
     if len(parts) == 1:
         return parts[0] + "."
     if len(parts) == 2:
@@ -37,10 +40,11 @@ def _fmt_authors_mla(author: str | None) -> str:
     return f"{parts[0]}, et al."
 
 
-def _fmt_authors_iso(author: str | None) -> str:
-    if not author:
+def _fmt_authors_iso(authors: list[str], author: str | None) -> str:
+    if not authors and not author:
         return "ANON."
-    parts = [a.strip().upper() for a in author.split(",") if a.strip()]
+    parts = authors if authors else [author] if author else []
+    parts = [a.strip().upper() for a in parts if a and a.strip()]
     return ", ".join(parts) + "."
 
 
@@ -50,7 +54,7 @@ def _safe(val: str | None, default: str = "") -> str:
 
 def format_apa7(ref: ParsedReference) -> str:
     """APA 7th edition"""
-    author = _fmt_authors_apa(ref.author)
+    author = _fmt_authors_apa(ref.authors, ref.author)
     year = f"({_safe(ref.year, 'n.d.')})"
     title = _safe(ref.title, "Untitled")
 
@@ -77,7 +81,7 @@ def format_apa7(ref: ParsedReference) -> str:
 
 def format_ieee(ref: ParsedReference, number: int) -> str:
     """IEEE style"""
-    author = _fmt_authors_ieee(ref.author)
+    author = _fmt_authors_ieee(ref.authors, ref.author)
     title = _safe(ref.title, "Untitled")
     parts = [f"[{number}] {author},"]
     parts.append(f'"{title},"')
@@ -105,7 +109,7 @@ def format_ieee(ref: ParsedReference, number: int) -> str:
 
 def format_iso690(ref: ParsedReference) -> str:
     """ISO 690"""
-    author = _fmt_authors_iso(ref.author)
+    author = _fmt_authors_iso(ref.authors, ref.author)
     year = _safe(ref.year, "n.d.")
     title = _safe(ref.title, "Untitled")
 
@@ -136,7 +140,7 @@ def format_iso690(ref: ParsedReference) -> str:
 
 def format_mla9(ref: ParsedReference) -> str:
     """MLA 9th edition"""
-    author = _fmt_authors_mla(ref.author)
+    author = _fmt_authors_mla(ref.authors, ref.author)
     title = f'"{_safe(ref.title, "Untitled")}."'
 
     parts = [author, title]

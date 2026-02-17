@@ -35,7 +35,8 @@ def _guess_entry_type(ref: ParsedReference) -> str:
 def _to_bib_entry(ref: ParsedReference, fallback_index: int) -> tuple[str, dict[str, Any]]:
     entry_type = _guess_entry_type(ref)
 
-    author = ref.author or "Anon"
+    author_list = ref.authors if ref.authors else ([ref.author] if ref.author else ["Anon"])
+    author = " and ".join(a for a in author_list if a)
     year = ref.year or "n.d."
     title = ref.title or f"Untitled {fallback_index}"
     citekey = make_citekey(author, year if year != "n.d." else None, title)

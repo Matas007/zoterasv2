@@ -78,10 +78,12 @@ tab_overview, tab_export, tab_formatted, tab_duplicates, tab_details = st.tabs([
 
 # ==================== Apzvalga ====================
 with tab_overview:
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     col1.metric("Dokumentu", len(batch.results))
     col2.metric("Viso saltiniu", len(batch.all_refs))
     col3.metric("Galimi dublikatai", len(batch.duplicates))
+    low_conf = sum(1 for r in batch.all_refs if r.confidence < 0.55)
+    col4.metric("Zemo pasitikejimo", low_conf)
 
     st.subheader("Visi rasti saltiniai")
     if batch.all_refs:
@@ -94,12 +96,16 @@ with tab_overview:
                     "pavadinimas": r.title or "--",
                     "zurnalas": r.journal or "",
                     "DOI": r.doi or "",
+                    "pasitikejimas": f"{int(r.confidence * 100)}%",
+                    "parseris": r.parser,
                 }
                 for i, r in enumerate(batch.all_refs)
             ],
             use_container_width=True,
             hide_index=True,
         )
+        if low_conf:
+            st.warning("Dalis irasu yra zemo pasitikejimo. Rekomenduojama juos perziureti ranka.")
     else:
         st.info("Saltiniu nerasta.")
 
@@ -203,6 +209,8 @@ with tab_details:
                             "autorius": r.author or "--",
                             "metai": r.year or "--",
                             "pavadinimas": r.title or "--",
+                            "pasitikejimas": f"{int(r.confidence * 100)}%",
+                            "parseris": r.parser,
                         }
                         for i, r in enumerate(res.refs)
                     ],

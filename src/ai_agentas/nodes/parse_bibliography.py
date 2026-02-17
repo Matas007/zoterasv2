@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any
 
 from ai_agentas.utils.bibliography import bibliography_to_entries
 from ai_agentas.utils.text_norm import norm_ws
@@ -14,6 +13,7 @@ class ParsedReference:
     title: str | None = None
     year: str | None = None
     author: str | None = None
+    authors: list[str] = field(default_factory=list)
     journal: str | None = None
     volume: str | None = None
     issue: str | None = None
@@ -21,35 +21,39 @@ class ParsedReference:
     publisher: str | None = None
     doi: str | None = None
     url: str | None = None
+    confidence: float = 0.0
+    parser: str = "regex-ensemble"
 
 
-# ---------------------------------------------------------------------------
-# Regex rinkiniai dažniausiems citavimo stiliams
-# ---------------------------------------------------------------------------
-
-# Metai (1900–2099)
 _YEAR_RE = re.compile(r"\b((?:19|20)\d{2})\b")
-
-# DOI
 _DOI_RE = re.compile(r"(?:doi\s*:\s*|https?://doi\.org/)(10\.\d{4,9}/[^\s,;]+)", re.IGNORECASE)
-
-# URL
 _URL_RE = re.compile(r"(https?://[^\s,;]+)")
-
-# Puslapiai: pp. 12-34, p. 5, 123–145
 _PAGES_RE = re.compile(r"(?:pp?\.\s*)?(\d{1,5}\s*[-–]\s*\d{1,5})")
-
-# Tomas/numeris: Vol. 12, No. 3  arba  12(3)
 _VOL_ISSUE_RE = re.compile(r"(?:Vol\.?\s*)?(\d{1,4})\s*\((\d{1,4})\)")
 _VOL_ONLY_RE = re.compile(r"(?:Vol\.?\s*)(\d{1,4})")
-
-# Numerinis prefiksas: [1], 1., 1)
 _NUM_PREFIX_RE = re.compile(r"^\s*(?:\[?\d{1,4}\]?[\.\)]\s*)")
+_QUOTED_TITLE_RE = re.compile(r"[\"'«„](.+?)[\"'»“]")
+_DOI_CLEAN_RE = re.compile(r"^https?://doi\.org/", re.IGNORECASE)
+
+_IEEE_RE = re.compile(
+    r"^\s*(?:\[\d+\]\s*)?"
+    r"(?P<author>[^\"“”]+?)\s*,\s*"
+    r"[\"“”](?P<title>.+?)[\"“”]\s*,\s*"
+    r"(?P<rest>.+)$"
+)
+_APA_RE = re.compile(
+    r"^\s*(?P<author>.+?)\s*\(\s*(?P<year>(?:19|20)\d{2}[a-z]?)\s*\)\s*\.?\s*(?P<rest>.+)$",
+    re.DOTALL,
+)
 
 
 def _extract_doi(text: str) -> str | None:
     m = _DOI_RE.search(text)
-    return m.group(1).rstrip(".") if m else None
+    if not m:
+        return None
+    doi = m.group(1).rstrip(".,;)")
+    doi = _DOI_CLEAN_RE.sub("", doi)
+    return doi.lower()
 
 
 def _extract_url(text: str) -> str | None:
@@ -78,131 +82,202 @@ def _extract_vol_issue(text: str) -> tuple[str | None, str | None]:
 
 
 def _strip_num_prefix(text: str) -> str:
-    """Pašalina numerinį prefiksą ([1], 1., 1) ir pan.)"""
     return _NUM_PREFIX_RE.sub("", text)
 
 
-def _split_author_rest(text: str) -> tuple[str, str]:
-    """
-    Bando atskirti autorių dalį nuo likusio teksto.
+def _split_authors(author_str: str | None) -> list[str]:
+    if not author_str:
+        return []
+    s = norm_ws(author_str)
+    if not s:
+        return []
 
-    Strategija:
-    - APA: „Petrauskas, J. (2020). Pavadinimas..."
-    - Bendras: „Petrauskas J., Jonaitis A. Pavadinimas..."
-    - Ieškome pirmo taško po kurio eina didžioji raidė arba metų skliaustas
-    """
-    # APA: autorius (-iai), metai skliaustuose
-    apa_m = re.match(
-        r"^(.+?)\s*\(\s*((?:19|20)\d{2}[a-z]?)\s*\)\s*\.?\s*(.*)$",
-        text,
-        re.DOTALL,
-    )
-    if apa_m:
-        return norm_ws(apa_m.group(1)), norm_ws(apa_m.group(3))
+    for sep in ("; ", " and ", " & ", " ir "):
+        if sep in s.lower():
+            parts = re.split(re.escape(sep), s, flags=re.IGNORECASE)
+            out = [norm_ws(p) for p in parts if norm_ws(p)]
+            return out if out else [s]
 
-    # Bandome: autorius iki pirmo taško, po kurio eina didžioji raidė
-    dot_positions = [i for i, ch in enumerate(text) if ch == "."]
-    for pos in dot_positions:
-        rest = text[pos + 1 :].lstrip()
-        if rest and rest[0].isupper():
-            # patikrinkime, ar prieš tašką nėra inicialų (pvz., „J.")
-            before = text[:pos + 1].rstrip()
-            # jei paskutinis žodis prieš tašką yra 1-2 simboliai — greičiausiai inicialas
-            last_word = before.split()[-1] if before.split() else ""
-            if len(last_word) <= 3:
-                continue
-            return norm_ws(text[: pos]), norm_ws(rest)
+    chunks = re.split(r",\s*(?=[A-Z][a-zA-Z\-']+\s*,\s*[A-Z]\.)", s)
+    if len(chunks) > 1:
+        return [norm_ws(c) for c in chunks if norm_ws(c)]
 
-    # Fallback: paimam iki pirmos kableliu atskirtos dalies su metais
-    year_m = _YEAR_RE.search(text)
-    if year_m:
-        idx = year_m.start()
-        candidate_author = text[:idx].rstrip(" ,.(")
-        if candidate_author and len(candidate_author) > 2:
-            return norm_ws(candidate_author), norm_ws(text[idx:])
-
-    return "", text
+    return [s]
 
 
 def _extract_title(rest: str) -> str | None:
-    """
-    Iš likusio teksto (po autoriaus) bando ištraukti pavadinimą.
-    Paprastai tai pirmas sakinys (iki taško) arba tekstas tarp kabučių / kursyvu.
-    """
     if not rest:
         return None
-
-    # Jei yra kabutės / guillemets
-    q_m = re.search(r'[""«„](.+?)[""»"]', rest)
+    q_m = _QUOTED_TITLE_RE.search(rest)
     if q_m:
         return norm_ws(q_m.group(1))
-
-    # Pirmas sakinys (iki taško, bet ne inicialų „A." tipo)
     parts = re.split(r"(?<=[^A-Z])\.\s+", rest, maxsplit=1)
     if parts:
         candidate = norm_ws(parts[0])
         if len(candidate) >= 5:
             return candidate
-
-    # Fallback: paimam pirmus ~150 simbolių
-    return norm_ws(rest[:150]) if len(rest) > 5 else None
+    return norm_ws(rest[:200]) if len(rest) > 5 else None
 
 
 def _extract_journal(rest: str) -> str | None:
-    """
-    Bando rasti žurnalo / šaltinio pavadinimą.
-    Dažnai eina po pavadinimo, prieš tomo/puslapių numerius, kursyvu (bet tekste to nematom).
-    Heuristika: tekstas tarp pavadinimo taško ir tomo/metų.
-    """
-    # Jei yra „In:" arba „In " — tai knygos/konferencijos pavadinimas
     in_m = re.search(r"\bIn[:\s]+(.+?)(?:\.|,\s*(?:Vol|pp|\d))", rest, re.IGNORECASE)
     if in_m:
         return norm_ws(in_m.group(1))
 
-    # Bandome: po pirmo sakinio taško, prieš „, Vol" arba „, \d+("
     parts = re.split(r"(?<=[^A-Z])\.\s+", rest)
     if len(parts) >= 2:
         candidate = norm_ws(parts[1].split(",")[0])
         if 3 < len(candidate) < 120:
             return candidate
 
+    comma_parts = [norm_ws(x) for x in rest.split(",") if norm_ws(x)]
+    if len(comma_parts) >= 2 and len(comma_parts[0]) > 3:
+        if not re.search(r"\b(vol|no|pp)\b", comma_parts[0], re.IGNORECASE):
+            return comma_parts[0]
     return None
 
 
-def parse_reference(raw_entry: str) -> ParsedReference:
-    """Bando regex'ais išparsuoti vieną bibliografijos įrašą."""
-    clean = _strip_num_prefix(raw_entry)
+def _confidence(ref: ParsedReference) -> float:
+    score = 0.0
+    if ref.title:
+        score += 0.30
+    if ref.year:
+        score += 0.20
+    if ref.author:
+        score += 0.20
+    if ref.journal:
+        score += 0.10
+    if ref.volume or ref.issue or ref.pages:
+        score += 0.10
+    if ref.doi or ref.url:
+        score += 0.10
+    if ref.title and len(ref.title) > 220:
+        score -= 0.15
+    return max(0.0, min(1.0, score))
 
+
+def _with_confidence(ref: ParsedReference) -> ParsedReference:
+    return ParsedReference(**{**ref.__dict__, "confidence": _confidence(ref)})
+
+
+def _parse_apa(clean: str) -> ParsedReference | None:
+    m = _APA_RE.match(clean)
+    if not m:
+        return None
+    author_str = norm_ws(m.group("author"))
+    rest = norm_ws(m.group("rest"))
+    title = _extract_title(rest)
+    year_raw = m.group("year")
+    year = year_raw[:4] if year_raw else None
+    journal = _extract_journal(rest)
+    pages = _extract_pages(rest)
+    vol, issue = _extract_vol_issue(rest)
+    return _with_confidence(
+        ParsedReference(
+            raw=clean,
+            title=title,
+            year=year,
+            author=author_str or None,
+            authors=_split_authors(author_str),
+            journal=journal,
+            volume=vol,
+            issue=issue,
+            pages=pages,
+            doi=_extract_doi(clean),
+            url=_extract_url(clean),
+            parser="apa-regex",
+        )
+    )
+
+
+def _parse_ieee(clean: str) -> ParsedReference | None:
+    m = _IEEE_RE.match(clean)
+    if not m:
+        return None
+    author_str = norm_ws(m.group("author").rstrip(","))
+    title = norm_ws(m.group("title"))
+    rest = norm_ws(m.group("rest"))
+    journal = _extract_journal(rest)
+    pages = _extract_pages(rest)
+    vol, issue = _extract_vol_issue(rest)
+    year = _extract_year(rest) or _extract_year(clean)
+    return _with_confidence(
+        ParsedReference(
+            raw=clean,
+            title=title,
+            year=year,
+            author=author_str or None,
+            authors=_split_authors(author_str),
+            journal=journal,
+            volume=vol,
+            issue=issue,
+            pages=pages,
+            doi=_extract_doi(clean),
+            url=_extract_url(clean),
+            parser="ieee-regex",
+        )
+    )
+
+
+def _parse_generic(clean: str) -> ParsedReference:
     doi = _extract_doi(clean)
     url = _extract_url(clean)
     year = _extract_year(clean)
     pages = _extract_pages(clean)
     vol, issue = _extract_vol_issue(clean)
 
-    author_str, rest = _split_author_rest(clean)
+    author_str = ""
+    rest = clean
+    year_m = _YEAR_RE.search(clean)
+    if year_m:
+        cut = clean[: year_m.start()].rstrip(" ,.(")
+        if len(cut) > 2:
+            author_str = norm_ws(cut)
+            rest = norm_ws(clean[year_m.end() :])
+    else:
+        first_dot = clean.find(".")
+        if first_dot > 4:
+            author_str = norm_ws(clean[:first_dot])
+            rest = norm_ws(clean[first_dot + 1 :])
+
     title = _extract_title(rest)
     journal = _extract_journal(rest)
-
-    return ParsedReference(
-        raw=raw_entry,
-        title=title,
-        year=year,
-        author=norm_ws(author_str) if author_str else None,
-        journal=journal,
-        volume=vol,
-        issue=issue,
-        pages=pages,
-        publisher=None,
-        doi=doi,
-        url=url,
+    return _with_confidence(
+        ParsedReference(
+            raw=clean,
+            title=title,
+            year=year,
+            author=author_str or None,
+            authors=_split_authors(author_str),
+            journal=journal,
+            volume=vol,
+            issue=issue,
+            pages=pages,
+            publisher=None,
+            doi=doi,
+            url=url,
+            parser="generic-regex",
+        )
     )
 
 
+def parse_reference(raw_entry: str) -> ParsedReference:
+    clean = _strip_num_prefix(raw_entry)
+    candidates: list[ParsedReference] = []
+
+    apa = _parse_apa(clean)
+    if apa is not None:
+        candidates.append(apa)
+    ieee = _parse_ieee(clean)
+    if ieee is not None:
+        candidates.append(ieee)
+    candidates.append(_parse_generic(clean))
+
+    best = max(candidates, key=lambda r: r.confidence)
+    return ParsedReference(**{**best.__dict__, "raw": raw_entry})
+
+
 def parse_bibliography_text(bibliography_text: str) -> list[ParsedReference]:
-    """
-    Pagrindinis entry-point: suskaldo bibliografiją į įrašus ir kiekvieną
-    išparsuoja Python regex parseriais (be jokių išorinių API/CLI).
-    """
     entries = bibliography_to_entries(bibliography_text)
     if not entries:
         return []

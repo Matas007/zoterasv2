@@ -19,20 +19,21 @@ def _guess_csl_type(ref: ParsedReference) -> str:
     return "article"
 
 
-def _parse_author_names(author_str: str | None) -> list[dict[str, str]]:
-    if not author_str:
+def _parse_author_names(authors: list[str], author_str: str | None) -> list[dict[str, str]]:
+    source = authors if authors else ([author_str] if author_str else [])
+    if not source:
         return [{"literal": "Anon"}]
-    authors = []
-    for part in author_str.split(","):
+    out = []
+    for part in source:
         part = part.strip()
         if not part:
             continue
         words = part.split()
         if len(words) >= 2:
-            authors.append({"family": words[0], "given": " ".join(words[1:])})
+            out.append({"family": words[0], "given": " ".join(words[1:])})
         elif words:
-            authors.append({"literal": words[0]})
-    return authors if authors else [{"literal": "Anon"}]
+            out.append({"literal": words[0]})
+    return out if out else [{"literal": "Anon"}]
 
 
 def ref_to_csl(ref: ParsedReference, index: int) -> dict[str, Any]:
@@ -46,7 +47,7 @@ def ref_to_csl(ref: ParsedReference, index: int) -> dict[str, Any]:
         "id": citekey,
         "type": _guess_csl_type(ref),
         "title": title,
-        "author": _parse_author_names(ref.author),
+        "author": _parse_author_names(ref.authors, ref.author),
     }
     if ref.year and ref.year.isdigit():
         item["issued"] = {"date-parts": [[int(ref.year)]]}
