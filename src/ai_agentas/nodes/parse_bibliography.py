@@ -41,6 +41,11 @@ _IEEE_RE = re.compile(
     r"[\"“”](?P<title>.+?)[\"“”]\s*,\s*"
     r"(?P<rest>.+)$"
 )
+_INPROC_RE = re.compile(
+    r"^\s*(?P<author>.+?)\.\s*(?P<year>(?:19|20)\d{2})\s+"
+    r"(?P<title>.+?)\.\s+In\s+(?P<rest>.+)$",
+    re.DOTALL,
+)
 _APA_RE = re.compile(
     r"^\s*(?P<author>.+?)\s*\(\s*(?P<year>(?:19|20)\d{2}[a-z]?)\s*\)\s*\.?\s*(?P<rest>.+)$",
     re.DOTALL,
@@ -137,6 +142,19 @@ def _extract_journal(rest: str) -> str | None:
     return None
 
 
+def _normalize_ocr_noise(text: str) -> str:
+    """
+    Lengvas, atgal suderinamas OCR/PDF triuksmo tvarkymas.
+    Nekeicia strukturos, tik pataiso daznus suklijavimus.
+    """
+    s = norm_ws(text)
+    # Pvz. "Privacy(sp" -> "Privacy (sp"
+    s = re.sub(r"([A-Za-z])\(", r"\1 (", s)
+    # Vienas dazniausiu netycinis suklijavimas tame domene
+    s = s.replace("largesparse", "large sparse")
+    return s
+
+
 def _confidence(ref: ParsedReference) -> float:
     score = 0.0
     if ref.title:
@@ -219,6 +237,48 @@ def _parse_ieee(clean: str) -> ParsedReference | None:
     )
 
 
+def _parse_inproceedings(clean: str) -> ParsedReference | None:
+    """
+    Konferenciniu irasu forma be kabuciu:
+    "Author. 2008 Title. In 2008 IEEE Symp.... pp. 111-125. IEEE. (doi:...)"
+    """
+    m = _INPROC_RE.match(clean)
+    if not m:
+        return None
+    author_str = norm_ws(m.group("author"))
+    year = m.group("year")
+    title = norm_ws(m.group("title"))
+    rest = norm_ws(m.group("rest"))
+    pages = _extract_pages(rest)
+    vol, issue = _extract_vol_issue(rest)
+
+    # Konferencijoms journal laukas naudojamas kaip "container/booktitle" pakaitalas
+    journal = None
+    in_part = re.split(r"(?:,?\s*pp?\.\s*\d|\.\s*(?:doi|https?://|ieee\b))", rest, maxsplit=1, flags=re.IGNORECASE)[0]
+    in_part = norm_ws(in_part.rstrip(".,;"))
+    if in_part and len(in_part) >= 6:
+        journal = in_part
+    if not journal:
+        journal = _extract_journal(rest)
+
+    return _with_confidence(
+        ParsedReference(
+            raw=clean,
+            title=title or None,
+            year=year or None,
+            author=author_str or None,
+            authors=_split_authors(author_str),
+            journal=journal,
+            volume=vol,
+            issue=issue,
+            pages=pages,
+            doi=_extract_doi(clean),
+            url=_extract_url(clean),
+            parser="inproc-regex",
+        )
+    )
+
+
 def _parse_generic(clean: str) -> ParsedReference:
     doi = _extract_doi(clean)
     url = _extract_url(clean)
@@ -262,7 +322,7 @@ def _parse_generic(clean: str) -> ParsedReference:
 
 
 def parse_reference(raw_entry: str) -> ParsedReference:
-    clean = _strip_num_prefix(raw_entry)
+    clean = _normalize_ocr_noise(_strip_num_prefix(raw_entry))
     candidates: list[ParsedReference] = []
 
     apa = _parse_apa(clean)
@@ -271,6 +331,9 @@ def parse_reference(raw_entry: str) -> ParsedReference:
     ieee = _parse_ieee(clean)
     if ieee is not None:
         candidates.append(ieee)
+    inproc = _parse_inproceedings(clean)
+    if inproc is not None:
+        candidates.append(inproc)
     candidates.append(_parse_generic(clean))
 
     best = max(candidates, key=lambda r: r.confidence)
