@@ -25,7 +25,7 @@ class ParsedReference:
     parser: str = "regex-ensemble"
 
 
-_YEAR_RE = re.compile(r"\b((?:19|20)\d{2})\b")
+_YEAR_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
 _DOI_RE = re.compile(r"(?:doi\s*:\s*|https?://doi\.org/)(10\.\d{4,9}/[^\s,;]+)", re.IGNORECASE)
 _URL_RE = re.compile(r"(https?://[^\s,;]+)")
 _PAGES_RE = re.compile(r"(?:pp?\.\s*)?(\d{1,5}\s*[-–]\s*\d{1,5})")
@@ -161,6 +161,10 @@ def _normalize_ocr_noise(text: str) -> str:
     s = norm_ws(text)
     # Pvz. "Privacy(sp" -> "Privacy (sp"
     s = re.sub(r"([A-Za-z])\(", r"\1 (", s)
+    # Metai sulipdyti su raidėmis: "2024Federated" -> "2024 Federated"
+    s = re.sub(r"(?<!\d)((?:19|20)\d{2})(?=[A-Za-z])", r"\1 ", s)
+    # Raidės sulipdytos su metais: "computing2024" -> "computing 2024"
+    s = re.sub(r"([A-Za-z])((?:19|20)\d{2})(?!\d)", r"\1 \2", s)
     # Vienas dazniausiu netycinis suklijavimas tame domene
     s = s.replace("largesparse", "large sparse")
     return s
