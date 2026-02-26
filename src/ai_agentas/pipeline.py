@@ -12,12 +12,22 @@ from ai_agentas.nodes.export_csljson import export_csljson
 from ai_agentas.nodes.duplicates import find_duplicates, DuplicatePair
 from ai_agentas.nodes.csl_formatter import format_bibliography
 from ai_agentas.nodes.update_docx import update_docx_placeholders, UpdateResult
+from ai_agentas.utils.crossref import enrich_refs_with_crossref
 
 
 @dataclass(frozen=True)
 class RunConfig:
     update_docx: bool = True
     csl_style: str = "APA 7"
+    parser: str = "auto"
+    anystyle_bin: str = "anystyle"
+    anystyle_base_url: str | None = None
+    anystyle_access_token: str | None = None
+    anystyle_timeout_seconds: float = 25.0
+    crossref_enabled: bool = True
+    crossref_mailto: str | None = None
+    crossref_rows: int = 5
+    crossref_timeout_seconds: float = 20.0
 
 
 @dataclass(frozen=True)
@@ -38,7 +48,21 @@ def run_pipeline(input_path: str, config: RunConfig) -> RunResult:
     doc = read_any(input_path)
     split = split_bibliography(doc.text)
 
-    refs = parse_bibliography_text(split.bibliography_text)
+    refs = parse_bibliography_text(
+        split.bibliography_text,
+        parser=config.parser,
+        anystyle_bin=config.anystyle_bin,
+        anystyle_base_url=config.anystyle_base_url,
+        anystyle_access_token=config.anystyle_access_token,
+        anystyle_timeout_seconds=config.anystyle_timeout_seconds,
+    )
+    if config.crossref_enabled and refs:
+        refs = enrich_refs_with_crossref(
+            refs,
+            mailto=config.crossref_mailto,
+            timeout_seconds=config.crossref_timeout_seconds,
+            rows=config.crossref_rows,
+        )
     bib = export_bibtex(refs)
     ris = export_ris(refs)
     csljson = export_csljson(refs)

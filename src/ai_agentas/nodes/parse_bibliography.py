@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import json
 import re
+import shutil
+import subprocess
+import tempfile
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
 
 from ai_agentas.utils.bibliography import bibliography_to_entries
@@ -355,8 +361,298 @@ def parse_reference(raw_entry: str) -> ParsedReference:
     return ParsedReference(**{**best.__dict__, "raw": raw_entry})
 
 
-def parse_bibliography_text(bibliography_text: str) -> list[ParsedReference]:
+def _csl_first_str(v: object) -> str | None:
+    if v is None:
+        return None
+    if isinstance(v, str):
+        s = norm_ws(v)
+        return s or None
+    if isinstance(v, list) and v:
+        first = v[0]
+        if isinstance(first, str):
+            s = norm_ws(first)
+            return s or None
+    return None
+
+
+def _csl_year(item: dict[str, object]) -> str | None:
+    for key in ("issued", "published-print", "published-online"):
+        issued = item.get(key)
+        if not isinstance(issued, dict):
+            continue
+        dp = issued.get("date-parts")
+        if isinstance(dp, list) and dp and isinstance(dp[0], list) and dp[0]:
+            y = dp[0][0]
+            if isinstance(y, int):
+                return str(y)
+            if isinstance(y, str) and y.isdigit():
+                return y
+    return None
+
+
+def _csl_authors(item: dict[str, object]) -> tuple[str | None, list[str]]:
+    authors_val = item.get("author")
+    if not isinstance(authors_val, list) or not authors_val:
+        return None, []
+
+    names: list[str] = []
+    for a in authors_val:
+        if not isinstance(a, dict):
+            continue
+        lit = a.get("literal")
+        if isinstance(lit, str) and norm_ws(lit):
+            names.append(norm_ws(lit))
+            continue
+        family = a.get("family")
+        given = a.get("given")
+        fam_s = norm_ws(family) if isinstance(family, str) else ""
+        giv_s = norm_ws(given) if isinstance(given, str) else ""
+        if fam_s and giv_s:
+            names.append(f"{fam_s}, {giv_s}")
+        elif fam_s:
+            names.append(fam_s)
+        elif giv_s:
+            names.append(giv_s)
+
+    names = [n for n in (norm_ws(x) for x in names) if n]
+    return ("; ".join(names) if names else None), names
+
+
+def _ref_from_csl_item(raw: str, item: dict[str, object], *, parser_name: str) -> ParsedReference:
+    author_str, authors = _csl_authors(item)
+    title = _csl_first_str(item.get("title"))
+    journal = _csl_first_str(item.get("container-title"))
+    year = _csl_year(item)
+    doi = _csl_first_str(item.get("DOI")) or _csl_first_str(item.get("doi"))
+    url = _csl_first_str(item.get("URL")) or _csl_first_str(item.get("url"))
+    volume = _csl_first_str(item.get("volume"))
+    issue = _csl_first_str(item.get("issue"))
+    pages = _csl_first_str(item.get("page"))
+    publisher = _csl_first_str(item.get("publisher"))
+
+    base = ParsedReference(
+        raw=raw,
+        title=title,
+        year=year,
+        author=author_str,
+        authors=authors,
+        journal=journal,
+        volume=volume,
+        issue=issue,
+        pages=pages,
+        publisher=publisher,
+        doi=doi.lower() if doi else None,
+        url=url,
+        parser=parser_name,
+    )
+
+    # Lengvas pasitikejimas: AnyStyle tipiskai pateikia daugiau struktūros
+    conf = 0.90
+    if base.title:
+        conf += 0.05
+    if base.author or base.authors:
+        conf += 0.03
+    if base.year:
+        conf += 0.02
+    return ParsedReference(**{**base.__dict__, "confidence": min(1.0, conf)})
+
+
+def _parse_bibliography_anystyle_cli(entries: list[str], *, anystyle_bin: str = "anystyle") -> list[ParsedReference]:
+    """
+    Naudoja AnyStyle CLI (`anystyle-cli`) ir grazina normalizuota CSL-JSON.
+    Reikalauja, kad sistemoje butu prieinamas `anystyle` vykdomasis failas.
+    """
+    if not entries:
+        return []
+
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", delete=False) as f:
+        tmp_path = f.name
+        for e in entries:
+            f.write(norm_ws(e))
+            f.write("\n")
+
+    try:
+        proc = subprocess.run(
+            [anystyle_bin, "--stdout", "-f", "csl", "parse", tmp_path],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+    except FileNotFoundError as e:
+        raise RuntimeError(
+            "Nepavyko rasti `anystyle` komandos. Irasykite AnyStyle CLI: "
+            "`gem install anystyle-cli` (reikes Ruby)."
+        ) from e
+    finally:
+        try:
+            import os
+
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        raise RuntimeError(f"AnyStyle CLI klaida (exit {proc.returncode}): {err[:500]}")
+
+    try:
+        parsed = json.loads(proc.stdout)
+    except json.JSONDecodeError as e:
+        out = (proc.stdout or "").strip()
+        raise RuntimeError(f"AnyStyle CLI negrazino JSON (pirmos 500 zenk.): {out[:500]}") from e
+
+    if not isinstance(parsed, list):
+        raise RuntimeError("AnyStyle CLI grazino netiketa formata (tikejomes JSON masyvo).")
+
+    refs: list[ParsedReference] = []
+    for i, raw in enumerate(entries):
+        item = parsed[i] if i < len(parsed) else None
+        if not isinstance(item, dict):
+            refs.append(parse_reference(raw))
+            continue
+
+        refs.append(_ref_from_csl_item(raw, item, parser_name="anystyle-cli"))
+
+    return refs
+
+
+def _parse_bibliography_anystyle_io(
+    entries: list[str],
+    *,
+    base_url: str,
+    access_token: str,
+    timeout_seconds: float = 25.0,
+) -> list[ParsedReference]:
+    """
+    Kviecia self-hostinta `anystyle.io` Rails aplikacija.
+
+    Endpoint'as: POST {base_url}/parse.csl
+    Parametrai: input=<tekstas>, access_token=<token>
+    Atsakymas: CSL-JSON (list[dict]) kaip JSON.
+    """
+    if not entries:
+        return []
+    base = base_url.rstrip("/")
+    url = f"{base}/parse.csl"
+
+    payload = urllib.parse.urlencode(
+        {"input": "\n".join(entries), "access_token": access_token}
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        raise RuntimeError(f"Nepavyko pasiekti AnyStyle serverio ({url}): {e}") from e
+
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"AnyStyle serveris negrazino JSON (pirmos 500 zenk.): {body[:500]}"
+        ) from e
+
+    if not isinstance(parsed, list):
+        raise RuntimeError("AnyStyle serveris grazino netiketa formata (tikejomes JSON masyvo).")
+
+    refs: list[ParsedReference] = []
+    for i, raw in enumerate(entries):
+        item = parsed[i] if i < len(parsed) else None
+        if not isinstance(item, dict):
+            refs.append(parse_reference(raw))
+            continue
+        refs.append(_ref_from_csl_item(raw, item, parser_name="anystyle-io"))
+
+    return refs
+
+
+def _try_parse_bibliography_anystyle_cli(entries: list[str], *, anystyle_bin: str) -> list[ParsedReference] | None:
+    """
+    Grazina None, jei CLI nepasiekiamas / nepavyksta paleisti.
+    """
+    bin_path = shutil.which(anystyle_bin) if anystyle_bin else None
+    if not bin_path:
+        return None
+    try:
+        return _parse_bibliography_anystyle_cli(entries, anystyle_bin=anystyle_bin)
+    except Exception:
+        return None
+
+
+def _try_parse_bibliography_anystyle_io(
+    entries: list[str],
+    *,
+    anystyle_base_url: str | None,
+    anystyle_access_token: str | None,
+    anystyle_timeout_seconds: float,
+) -> list[ParsedReference] | None:
+    """
+    Grazina None, jei truksta konfigo arba serveris nepasiekiamas.
+    """
+    if not anystyle_base_url or not anystyle_access_token:
+        return None
+    try:
+        return _parse_bibliography_anystyle_io(
+            entries,
+            base_url=anystyle_base_url,
+            access_token=anystyle_access_token,
+            timeout_seconds=anystyle_timeout_seconds,
+        )
+    except Exception:
+        return None
+
+
+def parse_bibliography_text(
+    bibliography_text: str,
+    parser: str = "regex-ensemble",
+    *,
+    anystyle_bin: str = "anystyle",
+    anystyle_base_url: str | None = None,
+    anystyle_access_token: str | None = None,
+    anystyle_timeout_seconds: float = 25.0,
+) -> list[ParsedReference]:
     entries = bibliography_to_entries(bibliography_text)
     if not entries:
         return []
-    return [parse_reference(e) for e in entries]
+    if parser == "auto":
+        # 1) Jei sukonfiguruotas serveris — jis patogiausias (nereikia Ruby lokaliai)
+        io_res = _try_parse_bibliography_anystyle_io(
+            entries,
+            anystyle_base_url=anystyle_base_url,
+            anystyle_access_token=anystyle_access_token,
+            anystyle_timeout_seconds=anystyle_timeout_seconds,
+        )
+        if io_res is not None:
+            return io_res
+
+        # 2) Kitu atveju bandom CLI (tikslus AnyStyle, bet reikia Ruby)
+        cli_res = _try_parse_bibliography_anystyle_cli(entries, anystyle_bin=anystyle_bin)
+        if cli_res is not None:
+            return cli_res
+
+        # 3) Fallback
+        return [parse_reference(e) for e in entries]
+    if parser == "regex-ensemble":
+        return [parse_reference(e) for e in entries]
+    if parser == "anystyle":
+        return _parse_bibliography_anystyle_cli(entries, anystyle_bin=anystyle_bin)
+    if parser in ("anystyle-io", "anystyle-http"):
+        if not anystyle_base_url or not anystyle_access_token:
+            raise ValueError("AnyStyle serveriui reikia `anystyle_base_url` ir `anystyle_access_token`.")
+        return _parse_bibliography_anystyle_io(
+            entries,
+            base_url=anystyle_base_url,
+            access_token=anystyle_access_token,
+            timeout_seconds=anystyle_timeout_seconds,
+        )
+    raise ValueError(f"Nezinomas parseris: {parser}")

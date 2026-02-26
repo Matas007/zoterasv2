@@ -6,11 +6,16 @@ from pathlib import Path
 # Uztikriname, kad "src" paketas butu randamas (svarbu Streamlit Cloud deploy'ui)
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
+import os
+
 import streamlit as st
+from dotenv import load_dotenv
 
 from ai_agentas.pipeline import RunConfig, run_batch
 from ai_agentas.nodes.csl_formatter import SUPPORTED_STYLES
 
+
+load_dotenv()
 
 st.set_page_config(page_title="Citatos -> Zotero (offline)", layout="wide")
 st.title("Citatos -> Zotero (offline)")
@@ -29,13 +34,44 @@ st.write(
 with st.sidebar:
     st.subheader("Nustatymai")
     csl_style = st.selectbox("Citavimo stilius", SUPPORTED_STYLES, index=0)
+    parser_choice = st.selectbox(
+        "Parseris",
+        [
+            "Auto (rekomenduojama)",
+            "Regex (numatytas, be Ruby)",
+            "AnyStyle CLI (reikia `anystyle-cli`)",
+            "AnyStyle Server (self-hosted anystyle.io)",
+        ],
+        index=0,
+    )
+
+    anystyle_bin = os.getenv("ANYSTYLE_BIN", "anystyle")
+    anystyle_base_url = os.getenv("ANYSTYLE_IO_BASE_URL", "")
+    anystyle_access_token = os.getenv("ANYSTYLE_IO_ACCESS_TOKEN", "")
+
+    if parser_choice.startswith("AnyStyle CLI"):
+        anystyle_bin = st.text_input("AnyStyle komanda (ANYSTYLE_BIN)", value=anystyle_bin)
+
+    if parser_choice.startswith("AnyStyle Server"):
+        anystyle_base_url = st.text_input("AnyStyle serverio URL (ANYSTYLE_IO_BASE_URL)", value=anystyle_base_url)
+        anystyle_access_token = st.text_input(
+            "Access token (ANYSTYLE_IO_ACCESS_TOKEN)",
+            value=anystyle_access_token,
+            type="password",
+            help="Tai NE anystyle.io UI slaptažodis. Self-hostintame anystyle.io jis saugomas `accounts.access_token`.",
+        )
+
     update_docx = st.checkbox("Atnaujinti DOCX citatas (placeholderiai)", value=True)
+    crossref_enabled = st.checkbox(
+        "Crossref patikslinimas (internetu, rekomenduojama)",
+        value=(os.getenv("CROSSREF_ENABLED", "true").lower() == "true"),
+    )
     export_format = st.selectbox("Eksporto formatas", ["BibTeX (.bib)", "RIS (.ris)", "CSL-JSON (.json)", "Visi formatai"])
     st.markdown("---")
     st.caption(
-        "Sis agentas veikia **pilnai offline** -- be jokiu API ar interneto. "
-        "Sugeneruota faila importuokite i Zotero: "
-        "File -> Import."
+        "Sis agentas veikia **offline**. Pagal nutylejima naudoja Python regex; "
+        "pasirinkus AnyStyle galima naudoti lokalu CLI arba self-hostinta anystyle.io serveri. "
+        "Sugeneruota faila importuokite i Zotero: File -> Import."
     )
 
 # --- Upload ---
@@ -58,7 +94,26 @@ for uf in uploaded_files:
     p.write_bytes(uf.getvalue())
     input_paths.append(str(p))
 
-cfg = RunConfig(update_docx=update_docx, csl_style=csl_style)
+parser_key = "regex-ensemble"
+if parser_choice.startswith("Auto"):
+    parser_key = "auto"
+elif parser_choice.startswith("AnyStyle CLI"):
+    parser_key = "anystyle"
+elif parser_choice.startswith("AnyStyle Server"):
+    parser_key = "anystyle-io"
+
+cfg = RunConfig(
+    update_docx=update_docx,
+    csl_style=csl_style,
+    parser=parser_key,
+    anystyle_bin=anystyle_bin,
+    anystyle_base_url=anystyle_base_url.strip() or None,
+    anystyle_access_token=anystyle_access_token.strip() or None,
+    crossref_enabled=crossref_enabled,
+    crossref_mailto=(os.getenv("CROSSREF_MAILTO") or "").strip() or None,
+    crossref_rows=int(os.getenv("CROSSREF_ROWS", "5")),
+    crossref_timeout_seconds=float(os.getenv("CROSSREF_TIMEOUT_SECONDS", "20")),
+)
 
 with st.spinner("Apdorojama..."):
     try:
