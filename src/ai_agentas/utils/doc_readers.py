@@ -32,6 +32,26 @@ def read_docx(path: str) -> DocumentText:
 
 _BULLET_OR_NUM_RE = re.compile(r"^\s*(?:\[\d{1,4}\]|(?:\d{1,4})[\.\)]|[-\u2022])\s*")
 _HEADING_RE = re.compile(r"^\s*(references|bibliography|literat[ūu]ra|literatura|šaltiniai|saltiniai)\s*$", re.IGNORECASE)
+_AUTHOR_COMMA_START_RE = re.compile(
+    r"^\s*[A-Z][A-Za-z'`\-]{1,40}\s*,\s*(?:[A-Z]\.|[A-Z][a-z]{1,30}|[A-Z]\.[A-Z]\.)"
+)
+_AUTHOR_YEAR_START_RE = re.compile(
+    r"^\s*[A-Z][A-Za-z'`\-]{2,40}\.?\s*(?:\(\s*(?:19|20)\d{2}[a-z]?\s*\)|\(\s*n\.d\.\s*\))",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_reference_start(line: str) -> bool:
+    s = (line or "").strip()
+    if not s:
+        return False
+    if _BULLET_OR_NUM_RE.match(s) or _HEADING_RE.match(s):
+        return True
+    if _AUTHOR_COMMA_START_RE.match(s):
+        return True
+    if _AUTHOR_YEAR_START_RE.match(s):
+        return True
+    return False
 
 
 def _normalize_pdf_text(raw_text: str) -> str:
@@ -65,13 +85,13 @@ def _normalize_pdf_text(raw_text: str) -> str:
             cur = cur[:-1] + nxt
             i += 1
 
-        # Jei kita eilutė nėra aiškiai naujas įrašas/heading'as, sulipdom kaip tąsa.
+        # Jei kita eilutė nėra aiškiai naujo šaltinio pradžia, sulipdom kaip tąsa.
         while i + 1 < len(lines):
             nxt_raw = lines[i + 1]
             nxt = re.sub(r"\s+", " ", nxt_raw).strip()
             if not nxt:
                 break
-            if _BULLET_OR_NUM_RE.match(nxt) or _HEADING_RE.match(nxt):
+            if _looks_like_reference_start(nxt):
                 break
             if cur.endswith((".", "!", "?", ":", ";")):
                 break
