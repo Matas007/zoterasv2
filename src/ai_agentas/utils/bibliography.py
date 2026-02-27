@@ -14,10 +14,15 @@ from .text_norm import (
 
 _BIB_ITEM_BULLET_RE = re.compile(r"^\s*(?:\[\d{1,4}\]|\d{1,4}[\.\)]|[-\u2022])\s*")
 _NUMBERED_ITEM_RE = re.compile(r"^\s*(?:\[\d{1,4}\]|\d{1,4}[\.\)])\s*")
-_LEADING_INDEX_RE = re.compile(r"^\s*(?:\[(\d{1,4})\][\.\)]?|(\d{1,4})[\.\)])\s*")
+_LEADING_INDEX_RE = re.compile(r"^\s*(?:\[?\s*([0-9Il|OoS]{1,4})\s*\]?[\.\)]?)\s+")
 _PDF_MARGIN_NOISE_RE = re.compile(
     r"^\s*\d{1,3}\s*[a-z0-9.-]+\.[a-z]{2,}(?:/[^\s]+)?\s+"
     r"(?:r\.\s*soc\.\s*open\s*sci\.?|journal|vol\.?\s*\d+|\d+:\s*\d+)",
+    re.IGNORECASE,
+)
+_PAGE_NO_RE = re.compile(r"^\s*\d{1,4}\s*$")
+_NOISE_KEYWORDS_RE = re.compile(
+    r"(?:copyright|all rights reserved|www\.[a-z0-9.-]+\.[a-z]{2,}|doi:\s*10\.|issn\b|ijarsct|journal)",
     re.IGNORECASE,
 )
 
@@ -26,13 +31,58 @@ def _leading_index(line: str) -> int | None:
     m = _LEADING_INDEX_RE.match(line or "")
     if not m:
         return None
-    g = m.group(1) or m.group(2)
+    g = m.group(1)
     if not g:
+        return None
+    # OCR / zmogiskos klaidos: I,l,| -> 1 ; O,o -> 0 ; S -> 5
+    tr = str.maketrans({"I": "1", "l": "1", "|": "1", "O": "0", "o": "0", "S": "5"})
+    g = g.translate(tr)
+    if not re.fullmatch(r"\d{1,4}", g):
         return None
     try:
         return int(g)
     except ValueError:
         return None
+
+
+def _is_probable_noise_line(line: str) -> bool:
+    l = norm_ws(line)
+    if not l:
+        return True
+    if _PAGE_NO_RE.match(l):
+        return True
+    if _PDF_MARGIN_NOISE_RE.match(l.lower()):
+        return True
+    return False
+
+
+def _drop_repeated_page_noise(lines: list[str]) -> list[str]:
+    """
+    Pasalina pasikartojancias PDF antrastes/poraštes ir izoliuotus puslapiu numerius.
+    """
+    if not lines:
+        return lines
+
+    freq: dict[str, int] = {}
+    for ln in lines:
+        n = norm_ws(ln).lower()
+        if not n:
+            continue
+        freq[n] = freq.get(n, 0) + 1
+
+    out: list[str] = []
+    for ln in lines:
+        n = norm_ws(ln).lower()
+        if not n:
+            out.append(ln)
+            continue
+        if _PAGE_NO_RE.match(n):
+            continue
+        # Kartojasi >1 karto ir atrodo kaip techninis triuksmas
+        if freq.get(n, 0) >= 2 and _NOISE_KEYWORDS_RE.search(n):
+            continue
+        out.append(ln)
+    return out
 
 
 def _find_numbered_sequence_start(lines: list[str], start_idx: int = 0) -> int | None:
@@ -41,33 +91,42 @@ def _find_numbered_sequence_start(lines: list[str], start_idx: int = 0) -> int |
     Naudinga PDF atvejams, kai tankio heuristika paslenka bibliografijos starta per velai.
     """
     best_start = None
-    best_len = 0
+    best_hits = 0
+    best_score = -10_000.0
 
     for i in range(max(0, start_idx), len(lines)):
         first = _leading_index(lines[i])
         if first is None:
             continue
         expected = first
-        seq_len = 0
+        seq_hits = 0
+        seq_gaps = 0
+        noise_steps = 0
         j = i
         while j < len(lines):
             idx = _leading_index(lines[j])
             if idx is None:
+                if _is_probable_noise_line(lines[j]):
+                    noise_steps += 1
                 j += 1
                 continue
-            if idx == expected:
-                seq_len += 1
-                expected += 1
+            if idx == expected or idx == expected + 1 or idx == expected + 2:
+                seq_hits += 1
+                if idx > expected:
+                    seq_gaps += idx - expected
+                expected = idx + 1
             elif idx > expected:
                 break
             j += 1
 
-        if seq_len > best_len:
-            best_len = seq_len
+        score = seq_hits * 1.0 - seq_gaps * 0.7 - noise_steps * 0.1
+        if seq_hits > best_hits or (seq_hits == best_hits and score > best_score):
+            best_hits = seq_hits
+            best_score = score
             best_start = i
 
-    # Praktiskai laikome patikima, jei turime bent 3 paeiliui numeruotus irasus.
-    if best_len >= 3:
+    # Praktiskai laikome patikima, jei turime bent 3 numeruotus irasus.
+    if best_hits >= 3:
         return best_start
     return None
 
@@ -127,12 +186,15 @@ def split_bibliography(text: str) -> BibliographySplit:
     2. Po rastos antrastes imame eilutes IKI kitos stop-antrastes (Priedai, Santrauka...)
     3. Jei antrastes nera — heuristinis "bib-like" tankio paieska
     """
-    lines = split_lines(text)
+    lines = _drop_repeated_page_noise(split_lines(text))
     if not lines:
         return BibliographySplit(body_text="", bibliography_text="", bibliography_start_line=None)
 
-    # 0) Jei dokumento gale matome stabilią [1],[2],[3]... seka — tai stiprus signalas.
-    seq_start = _find_numbered_sequence_start(lines, max(0, len(lines) - min(120, len(lines))))
+    # 0) Jei matome stabilia [1],[2],[3]... seka — tai stiprus signalas.
+    # Pirmiausia ieskome dokumento gale, jei neradome - per visa dokumenta.
+    seq_start = _find_numbered_sequence_start(lines, max(0, len(lines) - min(160, len(lines))))
+    if seq_start is None:
+        seq_start = _find_numbered_sequence_start(lines, 0)
 
     # 1) Ieskome visu bibliografijos antrasciu ir renkam geriausia kandidata
     heading_candidates = [i for i, ln in enumerate(lines) if looks_like_heading(ln)]
@@ -211,7 +273,7 @@ def bibliography_to_entries(bibliography_text: str) -> list[str]:
     Grupuoja pagal tuscias eilutes arba numeracija/bullet.
     Isfiltruoja aiksiai ne-saltininius irasus.
     """
-    lines = split_lines(bibliography_text)
+    lines = _drop_repeated_page_noise(split_lines(bibliography_text))
     entries: list[str] = []
     buf: list[str] = []
 
@@ -225,6 +287,34 @@ def bibliography_to_entries(bibliography_text: str) -> list[str]:
         if e:
             entries.append(e)
         buf = []
+
+    def split_numbered_entries(processed: list[str]) -> list[str]:
+        """
+        Skaido numeruotus irasus pagal markerio perejima.
+        Islaiko vientisuma net jei tarp eiluciu yra tarpai ar OCR triuksmas.
+        """
+        out: list[str] = []
+        local_buf: list[str] = []
+        current_idx: int | None = None
+
+        def flush_local():
+            nonlocal local_buf
+            e = " ".join(norm_ws(x) for x in local_buf if norm_ws(x)).strip()
+            if e:
+                out.append(e)
+            local_buf = []
+
+        for ln in processed:
+            idx = _leading_index(ln)
+            if idx is not None and (current_idx is None or idx != current_idx):
+                flush_local()
+                current_idx = idx
+                local_buf = [ln]
+                continue
+            local_buf.append(ln)
+
+        flush_local()
+        return out
 
     processed_lines: list[str] = []
     for ln in lines:
@@ -240,6 +330,8 @@ def bibliography_to_entries(bibliography_text: str) -> list[str]:
             flush()
             break
         processed_lines.append(ln)
+        if numbered_mode:
+            continue
         if buf and _BIB_ITEM_BULLET_RE.match(ln):
             flush()
         buf.append(ln)
@@ -249,9 +341,7 @@ def bibliography_to_entries(bibliography_text: str) -> list[str]:
     # Jei numeruotu eiluciu buvo pakankamai, bet del PDF lauzymo dalis irasu susiliejo,
     # atliekame papildoma skaidyma pagal numerinius markerius.
     if numbered_mode:
-        joined = "\n".join(processed_lines)
-        parts = re.split(r"(?m)^\s*(?=(?:\[\d{1,4}\][\.\)]?|\d{1,4}[\.\)]))", joined)
-        forced_entries = [norm_ws(p) for p in parts if norm_ws(p)]
+        forced_entries = [norm_ws(p) for p in split_numbered_entries(processed_lines) if norm_ws(p)]
         # Numeruotuose sarasuose filtruojame svelniau, kad neprarastume validziu irasu.
         forced_entries = [
             e
