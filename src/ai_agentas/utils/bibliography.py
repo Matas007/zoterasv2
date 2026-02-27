@@ -15,6 +15,9 @@ from .text_norm import (
 _BIB_ITEM_BULLET_RE = re.compile(r"^\s*(?:\[\d{1,4}\]|\d{1,4}[\.\)]|[-\u2022])\s*")
 _NUMBERED_ITEM_RE = re.compile(r"^\s*(?:\[\d{1,4}\]|\d{1,4}[\.\)])\s*")
 _LEADING_INDEX_RE = re.compile(r"^\s*(?:\[?\s*([0-9Il|OoS]{1,4})\s*\]?[\.\)]?)\s+")
+_AUTHOR_START_RE = re.compile(
+    r"^\s*[A-Z][A-Za-z'`\-]{1,40}\s*,\s*(?:[A-Z]\.|[A-Z][a-z]{1,30}|[A-Z]\.[A-Z]\.)"
+)
 _PDF_MARGIN_NOISE_RE = re.compile(
     r"^\s*\d{1,3}\s*[a-z0-9.-]+\.[a-z]{2,}(?:/[^\s]+)?\s+"
     r"(?:r\.\s*soc\.\s*open\s*sci\.?|journal|vol\.?\s*\d+|\d+:\s*\d+)",
@@ -54,6 +57,50 @@ def _is_probable_noise_line(line: str) -> bool:
     if _PDF_MARGIN_NOISE_RE.match(l.lower()):
         return True
     return False
+
+
+def _looks_like_unnumbered_ref_start(line: str) -> bool:
+    """
+    Heuristika nenumuotiems saltiniams: ar eilute panasi i naujo iraso pradzia.
+    Pvz. "Chapra, M. U.: 1992, ..."
+    """
+    l = norm_ws(line)
+    if not l or len(l) < 6:
+        return False
+    if looks_like_heading(l) or looks_like_stop_heading(l):
+        return False
+    if _BIB_ITEM_BULLET_RE.match(l):
+        return True
+    if _AUTHOR_START_RE.match(l):
+        return True
+    return False
+
+
+def _split_unnumbered_entries(lines: list[str]) -> list[str]:
+    """
+    Skaido nenumuotu bibliografiju eilutes i irasus pagal autoriu-pradzios signalus.
+    """
+    out: list[str] = []
+    buf: list[str] = []
+
+    def flush_local():
+        nonlocal buf
+        e = " ".join(norm_ws(x) for x in buf if norm_ws(x)).strip()
+        if e:
+            out.append(e)
+        buf = []
+
+    for ln in lines:
+        s = norm_ws(ln)
+        if not s:
+            flush_local()
+            continue
+        if buf and _looks_like_unnumbered_ref_start(s):
+            flush_local()
+        buf.append(s)
+
+    flush_local()
+    return out
 
 
 def _drop_repeated_page_noise(lines: list[str]) -> list[str]:
@@ -348,6 +395,12 @@ def bibliography_to_entries(bibliography_text: str) -> list[str]:
             for e in forced_entries
             if len(e) >= 10 and (_leading_index(e) is not None or not _is_clearly_not_reference(e))
         ]
+        if len(forced_entries) > len(entries):
+            entries = forced_entries
+    else:
+        # Nenumuotuose sarasuose daznai nera tusciu eilučių tarp irasu;
+        # papildomai skaidome pagal "Author, X." pradzios signalus.
+        forced_entries = [norm_ws(p) for p in _split_unnumbered_entries(processed_lines) if norm_ws(p)]
         if len(forced_entries) > len(entries):
             entries = forced_entries
 
