@@ -66,6 +66,11 @@ with st.sidebar:
         "Crossref patikslinimas (internetu, rekomenduojama)",
         value=(os.getenv("CROSSREF_ENABLED", "true").lower() == "true"),
     )
+    llm_fallback_enabled = st.checkbox(
+        "LLM fallback (Gemini) zemo pasitikejimo irasams",
+        value=bool((os.getenv("GOOGLE_API_KEY") or "").strip()),
+        help="Reikia GOOGLE_API_KEY. Patikslinami irasai, kuriu confidence < slenkstis arba truksta title/author.",
+    )
     export_format = st.selectbox("Eksporto formatas", ["BibTeX (.bib)", "RIS (.ris)", "CSL-JSON (.json)", "Visi formatai"])
     st.markdown("---")
     st.caption(
@@ -113,6 +118,11 @@ cfg = RunConfig(
     crossref_mailto=(os.getenv("CROSSREF_MAILTO") or "").strip() or None,
     crossref_rows=int(os.getenv("CROSSREF_ROWS", "5")),
     crossref_timeout_seconds=float(os.getenv("CROSSREF_TIMEOUT_SECONDS", "20")),
+    llm_fallback_enabled=llm_fallback_enabled,
+    llm_confidence_threshold=float(os.getenv("LLM_FALLBACK_CONFIDENCE_THRESHOLD", "0.70")),
+    google_api_key=(os.getenv("GOOGLE_API_KEY") or "").strip() or None,
+    google_model=(os.getenv("GOOGLE_MODEL") or "gemini-1.5-flash").strip(),
+    llm_max_output_tokens=int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "1024")),
 )
 
 with st.spinner("Apdorojama..."):

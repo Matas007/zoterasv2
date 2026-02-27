@@ -5,3 +5,4 @@ python-dotenv
 pydantic
 bibtexparser
 rapidfuzz
+google-generativeai

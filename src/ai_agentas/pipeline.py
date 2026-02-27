@@ -13,6 +13,7 @@ from ai_agentas.nodes.duplicates import find_duplicates, DuplicatePair
 from ai_agentas.nodes.csl_formatter import format_bibliography
 from ai_agentas.nodes.update_docx import update_docx_placeholders, UpdateResult
 from ai_agentas.utils.crossref import enrich_refs_with_crossref
+from ai_agentas.utils.llm_refinement import refine_refs_with_llm
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,11 @@ class RunConfig:
     crossref_mailto: str | None = None
     crossref_rows: int = 5
     crossref_timeout_seconds: float = 20.0
+    llm_fallback_enabled: bool = False
+    llm_confidence_threshold: float = 0.70
+    google_api_key: str | None = None
+    google_model: str = "gemini-1.5-flash"
+    llm_max_output_tokens: int = 1024
 
 
 @dataclass(frozen=True)
@@ -62,6 +68,14 @@ def run_pipeline(input_path: str, config: RunConfig) -> RunResult:
             mailto=config.crossref_mailto,
             timeout_seconds=config.crossref_timeout_seconds,
             rows=config.crossref_rows,
+        )
+    if config.llm_fallback_enabled and config.google_api_key and refs:
+        refs = refine_refs_with_llm(
+            refs,
+            api_key=config.google_api_key,
+            model=config.google_model,
+            confidence_threshold=config.llm_confidence_threshold,
+            max_output_tokens=config.llm_max_output_tokens,
         )
     bib = export_bibtex(refs)
     ris = export_ris(refs)
