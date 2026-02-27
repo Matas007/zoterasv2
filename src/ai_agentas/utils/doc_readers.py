@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +30,63 @@ def read_docx(path: str) -> DocumentText:
     return DocumentText(text="\n".join(parts).strip(), source_path=str(p), kind="docx")
 
 
+_BULLET_OR_NUM_RE = re.compile(r"^\s*(?:\[\d{1,4}\]|(?:\d{1,4})[\.\)]|[-\u2022])\s*")
+_HEADING_RE = re.compile(r"^\s*(references|bibliography|literat[ūu]ra|literatura|šaltiniai|saltiniai)\s*$", re.IGNORECASE)
+
+
+def _normalize_pdf_text(raw_text: str) -> str:
+    """
+    Normalizuoja PDF ištrauktą tekstą į stabilesnį TXT:
+    - suvienodina tarpus;
+    - sulipdo eilučių lūžius sakinio viduryje;
+    - palieka naują eilutę prie numeruotų/bullet įrašų ir heading'ų.
+    """
+    if not raw_text:
+        return ""
+
+    text = raw_text.replace("\r\n", "\n").replace("\r", "\n").replace("\u00a0", " ")
+    lines = [ln.rstrip() for ln in text.split("\n")]
+
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        ln = re.sub(r"\s+", " ", lines[i]).strip()
+        if not ln:
+            out.append("")
+            i += 1
+            continue
+
+        # De-hyphenation tarp eilučių: "crypto-\ncurrency" -> "cryptocurrency"
+        cur = ln
+        while cur.endswith("-") and i + 1 < len(lines):
+            nxt = re.sub(r"\s+", " ", lines[i + 1]).strip()
+            if not nxt:
+                break
+            cur = cur[:-1] + nxt
+            i += 1
+
+        # Jei kita eilutė nėra aiškiai naujas įrašas/heading'as, sulipdom kaip tąsa.
+        while i + 1 < len(lines):
+            nxt_raw = lines[i + 1]
+            nxt = re.sub(r"\s+", " ", nxt_raw).strip()
+            if not nxt:
+                break
+            if _BULLET_OR_NUM_RE.match(nxt) or _HEADING_RE.match(nxt):
+                break
+            if cur.endswith((".", "!", "?", ":", ";")):
+                break
+            cur = f"{cur} {nxt}"
+            i += 1
+
+        out.append(cur)
+        i += 1
+
+    # Sumažinam kelių tuščių eilučių triukšmą iki vienos.
+    normalized = "\n".join(out)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    return normalized.strip()
+
+
 def read_pdf(path: str) -> DocumentText:
     import fitz  # pymupdf
 
@@ -36,8 +94,11 @@ def read_pdf(path: str) -> DocumentText:
     doc = fitz.open(str(p))
     parts: list[str] = []
     for page in doc:
-        parts.append(page.get_text("text"))
-    return DocumentText(text="\n".join(parts).strip(), source_path=str(p), kind="pdf")
+        # sort=True padeda nuoseklesnei skaitymo tvarkai.
+        parts.append(page.get_text("text", sort=True))
+    raw = "\n".join(parts).strip()
+    cleaned = _normalize_pdf_text(raw)
+    return DocumentText(text=cleaned, source_path=str(p), kind="pdf")
 
 
 def read_text(path: str) -> DocumentText:
